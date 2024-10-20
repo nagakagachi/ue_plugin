@@ -1,9 +1,19 @@
-SceneViewExtension + RDG Sample
+for UE5.4
+
+SceneViewExtension + RDG Sample Plugin
 
 - Setup
-- - copy "ViewExtensionSample" directory to "Plugins" directory
-- - drag&drop ViewExtensionSampleControlActor to Level
-- - change parameters
+  - copy "ViewExtensionSample" directory to "Plugins" directory
+  - drag&drop ViewExtensionSampleControlActor to Level
+  - change parameters
+
+
+- Features
+  - Custom Lens Ghost
+  - Anisotropic Kuwahara Filter
+  - World Normal Gbuffer Unlit
+  - History Texture Test
+  - Screen Space Voronoi Postprocess Test
 
 ![](../../images/ViewExtensionSample/setup_actor.png)
 
