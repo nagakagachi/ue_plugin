@@ -1,0 +1,77 @@
+// resolve_hack_shading_model.usf
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+
+// ---------------------------------------------------------------------------------------------------------------------
+// PostGBuffer
+	SamplerState pass0_sampler_screen;
+	Texture2D pass0_tex_gbuffer_b_custom;
+	Texture2D pass0_tex_gbuffer_c;
+
+	/*
+	DeferredShadingCommon.ush
+	float EncodeShadingModelIdAndSelectiveOutputMask(uint ShadingModelId, uint SelectiveOutputMask)
+	{
+		uint Value = (ShadingModelId & SHADINGMODELID_MASK) | SelectiveOutputMask;
+		return (float)Value / (float)0xFF;
+	}
+	uint DecodeShadingModelId(float InPackedChannel)
+	{
+		return ((uint)round(InPackedChannel * (float)0xFF)) & SHADINGMODELID_MASK;
+	}
+	uint DecodeSelectiveOutputMask(float InPackedChannel)
+	{
+		return ((uint)round(InPackedChannel * (float)0xFF)) & ~SHADINGMODELID_MASK;
+	}
+	*/
+
+	// EngineのDrawScreenPassを利用し, 自動でDrawRectangle関連のParameterが割り当てられる想定.
+	void Pass0_VS(
+		in float4 InPosition : ATTRIBUTE0,
+		in float2 InTexcoord : ATTRIBUTE1,
+
+		out noperspective float4 OutUVAndScreenPos : TEXCOORD0,
+		out float4 OutPosition : SV_POSITION)
+	{
+		DrawRectangle(InPosition, InTexcoord, OutPosition, OutUVAndScreenPos);
+	}
+
+	struct Pass0_PsOut
+	{
+		float4 pbr_shadingmodel : SV_TARGET0;
+		float4 bc_ao			: SV_TARGET1;
+	};
+	Pass0_PsOut Pass0_PS(
+		noperspective float4 UVAndScreenPos : TEXCOORD0,
+		float4 OutPosition : SV_POSITION
+		)
+	{
+		Pass0_PsOut ps_output = (Pass0_PsOut)0;
+		
+		float2 UV = UVAndScreenPos.xy;
+
+		// 先行してShadingModelをチェック.
+		float4 gbuffer_b_value = Texture2DSample(pass0_tex_gbuffer_b_custom, pass0_sampler_screen, UV);
+		uint shading_model = DecodeShadingModelId(gbuffer_b_value.a);
+		uint selective_output_mask = DecodeSelectiveOutputMask(gbuffer_b_value.a);
+
+		// Material側の自前の専用MaterialFunctionでShadingModelを書き換えたピクセルを処理する.
+		//	ここでCustomShadingModelは 15 としている.
+		const uint k_test_shading_model_id = 15;
+		if(k_test_shading_model_id != shading_model)
+		{
+			discard;// 破棄.
+		}
+		// バッファ読み取り.
+		float4 gbuffer_c_value = Texture2DSample(pass0_tex_gbuffer_c, pass0_sampler_screen, UV);
+		
+		ps_output.pbr_shadingmodel = gbuffer_b_value;
+		ps_output.bc_ao = gbuffer_c_value;
+		
+		// テスト用のShadingModelのピクセルをUnlit扱いにして書き戻す.
+		//	DefaultLitマテリアルで出力ShadingModelをハックしてUnlitではない値(15等)の値にすることでGBufferが書き込まれ、ここで実際にShadingMdelの値をUnlitに書き換えることでPostProcess段階でGBufferのあるUnlitのようにできる.
+		ps_output.pbr_shadingmodel.a = EncodeShadingModelIdAndSelectiveOutputMask(SHADINGMODELID_UNLIT, selective_output_mask);
+		
+		return ps_output;
+	}

@@ -1,0 +1,140 @@
+// voronoi_jfa_compute.usf
+
+#include "/Engine/Private/Common.ush"
+
+/*
+	Jump Flooding(Jfa) でVoronoi Diagramを計算する.
+	初回パスと反復パス両方のコードパスを含む.
+
+	--- 以下は擬似コード ---
+
+	// 作業用バッファ.
+	WorkBufferA = Seedピクセルのみが {0,0,1}, それ以外が {0,0,0} で初期化されたテクスチャ(16bit float).
+	WorkBufferB = 反復処理のPingPong用の同一フォーマットバッファ.
+
+	// 反復時のPingPong用の配列化.
+	PingPongBuffers[2] = {WorkBufferA, WorkBufferB}
+
+	// バッファサイズからJfaの反復ステップ数を計算.
+	const int JfaTargetSize = std::max(WorkBuffer.Width, WorkBuffer.Height);
+	const int JfaStepCount = log2(JfaTargetSize) - 1;
+
+
+	//初回パスフラグを有効にしてDispatch.
+	Context.IsJumpFloodingFirstPass = 1; // 初回Pass
+	Context.JumpFloodingStepSize = 1;
+	Context.Input = PingPongBuffers[0]; // 初回は 0 にSeed書き込みされたWorkBufferAが入っている
+	Context.Output = PingPongBuffers[1];
+	Dispatch(Context).
+
+	Jfa反復パスをPingPongBufferで実行.	
+	for(int i = 0; i < JfaStepCount; ++i)
+	{
+		// バッファサイズに対して 1/2, 4/1, 8/1,,, のステップサイズで反復実行することでJfa.
+		const int jfa_step_size = pow(2, JfaStepCount - i);
+
+		// PingPong フリップ.
+		swap(PingPongBuffers[0], PingPongBuffers[1]);
+		
+		Context.IsJumpFloodingFirstPass = 0; // not 初回Pass
+		Context.JumpFloodingStepSize = jfa_step_size;
+		Context.Input = PingPongBuffers[0];
+		Context.Output = PingPongBuffers[1];
+		Dispatch(Context).
+	}
+
+	// PingPongBuffers[1] に最終結果が格納される.
+	
+*/
+
+
+// Mode. First Pass Mode : 1, Iteration Pass Mode : 0
+uint IsJumpFloodingFirstPass;
+// Jump Flooding Step Width.
+uint JumpFloodingStepSize;
+
+// Input Voronoi Work. need upper than 16bit float rgb.
+//	pos.x, pos.y, seed
+Texture2D VoronoiWorkTexture;
+uint2 VoronoiWorkTextureDimensions;
+SamplerState VoronoiWorkTextureSampler;
+
+// Output Voronoi Work. need upper than 16bit float rgb.
+//	pos.x, pos.y, seed
+RWTexture2D<float3> OutputTexture;
+uint2 OutputDimensions;
+
+[numthreads(THREADGROUPSIZE_X,THREADGROUPSIZE_Y,THREADGROUPSIZE_Z)]
+void MainCS(
+	uint3 Gid	: SV_GroupID,
+	uint3 DTid	: SV_DispatchThreadID,
+	uint3 GTid	: SV_GroupThreadID,
+	uint Gi		: SV_GroupIndex
+	)
+{
+	const int2 pixel_pos = DTid.xy;
+	const float2 pixel_center = pixel_pos + float2(0.5, 0.5);
+
+	// 中心サンプル.
+	const float3 cur_voronoi_value = VoronoiWorkTexture.Load(uint3(pixel_pos, 0)).xyz;
+	
+	float nearest_distance = 65535;
+	// ピクセル中心座標. 0.5オフセットされている中心が格納されている場合に有効, 0,0で無効値扱い.
+	float2 nearest_pixel_center = float2(0,0);
+
+	for(int j = -1; j <= 1; ++j)
+	{
+		for(int i = -1; i <= 1; ++i)
+		{
+			const int2 sample_pixel_pos = pixel_pos + int2(i, j) * JumpFloodingStepSize;
+			// オフセットされたピクセル中心座標.
+			const float2 sample_pixel_center = sample_pixel_pos + float2(0.5, 0.5);
+
+			// 範囲外チェック. 入出力同一サイズ仮定.
+			if(any(int2(0,0) > sample_pixel_pos) || any(OutputDimensions <= sample_pixel_pos))
+				continue;
+
+			const float3 sample_voronoi_value = VoronoiWorkTexture.Load(uint3(sample_pixel_pos, 0)).xyz;
+
+			float2 voronoi_compare_center;
+			if(0 != IsJumpFloodingFirstPass)
+			{
+				// 初回パス. 初回はサンプルピクセル自体の中心座標を値として採用.
+				voronoi_compare_center = sample_pixel_center;
+				
+				// 対象ピクセルの値が非ゼロ(エッジ等)の場合のみ有効シードとして処理する. それ以外はスキップ.
+				if(all(0 == sample_voronoi_value))
+				{
+					continue;
+				}
+			}
+			else
+			{
+				// 反復パス. Voronoiテクスチャの作業中の値を採用.
+				voronoi_compare_center = sample_voronoi_value.xy;
+				
+				// サンプルピクセルの値は有効であれば 0.5 オフセットされたピクセル中心座標であるため.
+				// 0,0 の場合は無効でまだJumpFloodingで確定していないピクセルであるとしてスキップ.
+				// 反復パスでは有効なピクセルについてxyが格納されているのでzは見ない.
+				if(all(0 == sample_voronoi_value.xy))
+					continue;
+			}
+			
+
+			// 反復中はサンプルピクセルのワークテクスチャ中の値を採用. 誤差対策で改めてピクセル中心座標を計算.
+			const float2 voronoi_nearest_center = floor(voronoi_compare_center) + float2(0.5, 0.5);
+			
+			const float dist = distance(voronoi_nearest_center, pixel_center);
+			if(nearest_distance > dist)
+			{
+				// 最近傍更新.
+				nearest_pixel_center = voronoi_nearest_center;
+				nearest_distance = dist;
+			}
+		}
+	}
+	
+	OutputTexture[DTid.xy] = float3(nearest_pixel_center, cur_voronoi_value.z);
+}
+
+

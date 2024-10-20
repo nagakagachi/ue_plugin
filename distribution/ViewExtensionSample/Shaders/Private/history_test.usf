@@ -1,0 +1,33 @@
+// history_test.usf
+
+#include "/Engine/Private/Common.ush"
+
+// ---------------------------------------------------------------------------------------------------------------------
+// デバッグ描画用.
+	Texture2D SourceTexture;
+	uint2 SourceDimensions;
+	SamplerState SourceSampler;
+
+	Texture2D HistoryTexture;
+
+	RWTexture2D<float4> OutputTexture;
+	uint2 OutputDimensions;
+
+	[numthreads(THREADGROUPSIZE_X,THREADGROUPSIZE_Y,THREADGROUPSIZE_Z)]
+	void MainCS(
+		uint3 Gid	: SV_GroupID,
+		uint3 DTid	: SV_DispatchThreadID,
+		uint3 GTid	: SV_GroupThreadID,
+		uint Gi		: SV_GroupIndex
+		)
+	{
+		float4 source_color = SourceTexture.Load(int3(DTid.xy, 0));
+		float4 prev_color = HistoryTexture.Load(int3(DTid.xy, 0));
+
+		const float4 tmp_lerp_color = lerp(source_color, prev_color, 0.5);
+		// 輝度が高いほど残像を強く残す.
+		float temporal_rate = lerp(0.0, 0.95, saturate(Luminance(tmp_lerp_color.rgb) / 2.0));
+		temporal_rate = temporal_rate*temporal_rate;
+		OutputTexture[DTid.xy] = lerp(source_color, prev_color, temporal_rate);
+	}
+

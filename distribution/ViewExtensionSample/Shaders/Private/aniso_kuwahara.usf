@@ -1,0 +1,277 @@
+/*
+	aniso_kuwahara.usf
+
+https://www.kyprianidis.com/p/pg2009/jkyprian-pg2009.pdf
+https://diglib.eg.org/server/api/core/bitstreams/3309663a-3134-44bc-9297-2fa33554277d/content
+https://github.com/GarrettGunnell/Post-Processing
+
+*/
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Eigenvector.
+	Texture2D eigenvectorpass_SourceTexture;
+	uint2 eigenvectorpass_SourceDimensions;
+	SamplerState eigenvectorpass_SourceSampler;
+
+	RWTexture2D<float4> eigenvectorpass_OutputTexture;
+	uint2 eigenvectorpass_OutputDimensions;
+
+	[numthreads(THREADGROUPSIZE_X,THREADGROUPSIZE_Y,THREADGROUPSIZE_Z)]
+	void EigenvectorPass_CS(
+		uint3 Gid	: SV_GroupID,
+		uint3 DTid	: SV_DispatchThreadID,
+		uint3 GTid	: SV_GroupThreadID,
+		uint Gi		: SV_GroupIndex
+		)
+	{
+		const float2 pixel_pos = DTid.xy + float2(0.5, 0.5);
+
+		float3 f00 = eigenvectorpass_SourceTexture.Load(int3(DTid.xy + int2(-1, -1), 0)).xyz;
+		float3 f10 = eigenvectorpass_SourceTexture.Load(int3(DTid.xy + int2(0, -1), 0)).xyz;
+		float3 f20 = eigenvectorpass_SourceTexture.Load(int3(DTid.xy + int2(1, -1), 0)).xyz;
+
+		float3 f01 = eigenvectorpass_SourceTexture.Load(int3(DTid.xy + int2(-1, 0), 0)).xyz;
+		float3 f21 = eigenvectorpass_SourceTexture.Load(int3(DTid.xy + int2(1, 0), 0)).xyz;
+		
+		float3 f02 = eigenvectorpass_SourceTexture.Load(int3(DTid.xy + int2(-1, 1), 0)).xyz;
+		float3 f12 = eigenvectorpass_SourceTexture.Load(int3(DTid.xy + int2(0, 1), 0)).xyz;
+		float3 f22 = eigenvectorpass_SourceTexture.Load(int3(DTid.xy + int2(1, 1), 0)).xyz;
+
+		// sobel.
+		float3 sx =
+			((1.0*f20 + 2.0*f21 + 1.0*f22) - (1.0*f00 + 2.0*f01 + 1.0*f02)) / 4.0;
+		float3 sy =
+			((1.0*f02 + 2.0*f12 + 1.0*f22) - (1.0*f00 + 2.0*f10 + 1.0*f20)) / 4.0;
+
+		float exx = dot(sx, sx);
+		float exy = dot(sx, sy);
+		float eyy = dot(sy, sy);
+		
+		eigenvectorpass_OutputTexture[DTid.xy] = float4(exx, eyy, exy, 1);
+	}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Blur Eigenvector.
+//	テンソルの正規化しないことで強いエッジの影響度が残るようにしている(参考. Image and Video Abstraction by Anisotropic Kuwahara Filtering).
+
+	float GaussFunction(float sigma, float r)
+	{
+		const float PI = 3.14159265;
+		return (1.0f / sqrt(2.0f * PI * sigma * sigma)) * exp(-(r * r) / (2.0f * sigma * sigma));
+	}
+
+	Texture2D blurpass_SourceTexture;
+	uint2 blurpass_SourceDimensions;
+	SamplerState blurpass_SourceSampler;
+
+	RWTexture2D<float4> blurpass_OutputTexture;
+	uint2 blurpass_OutputDimensions;
+
+	[numthreads(THREADGROUPSIZE_X,THREADGROUPSIZE_Y,THREADGROUPSIZE_Z)]
+	void BlurPass_CS(
+		uint3 Gid	: SV_GroupID,
+		uint3 DTid	: SV_DispatchThreadID,
+		uint3 GTid	: SV_GroupThreadID,
+		uint Gi		: SV_GroupIndex
+		)
+	{
+        const int kernelRadius = 5;
+
+		const int2 pixel_point = DTid.xy;
+
+		// TODO. 分離可能フィルタへの変更も可能.
+		float4 accum_data = (float4)0;
+		float  accum_weight = 0;
+		for(int j = -kernelRadius; j <= kernelRadius; ++j)
+		{
+			for(int i = -kernelRadius; i <= kernelRadius; ++i)
+			{
+				const int2 sample_offset = int2(i,j);
+				const float4 sampleL_data = blurpass_SourceTexture.Load(int3(pixel_point + sample_offset, 0));
+
+				const float g = GaussFunction(2.0, length(sample_offset));
+
+				accum_data += g * sampleL_data;
+				accum_weight += g;
+			}
+		}
+
+		accum_data /= accum_weight;
+		
+		blurpass_OutputTexture[DTid.xy] = accum_data;
+	}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Calc Anisotropy.
+	Texture2D calcanisopass_SourceTexture;
+	uint2 calcanisopass_SourceDimensions;
+	SamplerState calcanisopass_SourceSampler;
+
+	RWTexture2D<float4> calcanisopass_OutputTexture;
+	uint2 calcanisopass_OutputDimensions;
+
+	[numthreads(THREADGROUPSIZE_X,THREADGROUPSIZE_Y,THREADGROUPSIZE_Z)]
+	void CalcAnisoPass_CS(
+		uint3 Gid	: SV_GroupID,
+		uint3 DTid	: SV_DispatchThreadID,
+		uint3 GTid	: SV_GroupThreadID,
+		uint Gi		: SV_GroupIndex
+		)
+	{
+		const int2 pixel_point = DTid.xy;
+
+		const float4 eigenvector = calcanisopass_SourceTexture.Load(int3(pixel_point, 0));
+		const float E = eigenvector.x;
+		const float G = eigenvector.y;
+		const float F = eigenvector.z;
+
+		const float sqrt_innner_term = (E-G)*(E-G) + 4.0*F*F;
+		const float term_sqrt = (1e-4 < sqrt_innner_term)? sqrt( sqrt_innner_term ) : 0.0;
+		float lambda1 = (E + G + term_sqrt) * 0.5;
+		float lambda2 = (E + G - term_sqrt) * 0.5;
+
+		const float anisotropy = (1e-4 < (lambda1 + lambda2))? (lambda1 - lambda2) / (lambda1 + lambda2) : 0.0;
+		const float2 v = float2(lambda1 - E, -F);
+		const float2 t = (any(0 < abs(v)))? normalize(v) : float2(0.0f, 1.0f);
+		const float phi = -atan2(t.y, t.x);
+		
+		calcanisopass_OutputTexture[DTid.xy] = float4(t.x, t.y, phi, anisotropy);
+	}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Final.
+	Texture2D finalpass_SourceTexture;
+	uint2 finalpass_SourceDimensions;
+	SamplerState finalpass_SourceSampler;
+
+	Texture2D finalpass_SceneTexture;
+
+	RWTexture2D<float4> finalpass_OutputTexture;
+	uint2 finalpass_OutputDimensions;
+
+	float finalpass_aniso_control; // 1
+	float finalpass_hardness; // 8
+	float finalpass_sharpness; // 8
+
+	#define k_aniso_kuwahara_section_count 8
+
+	[numthreads(THREADGROUPSIZE_X,THREADGROUPSIZE_Y,THREADGROUPSIZE_Z)]
+	void FinalPass_CS(
+		uint3 Gid	: SV_GroupID,
+		uint3 DTid	: SV_DispatchThreadID,
+		uint3 GTid	: SV_GroupThreadID,
+		uint Gi		: SV_GroupIndex
+		)
+	{
+		const int k_kernel_radius = 7;
+		const float k_aniso_param = finalpass_aniso_control;//1.0;
+		
+		const int2 pixel_point = DTid.xy;
+
+		float4 aniso_data = finalpass_SourceTexture.Load(int3(pixel_point, 0));
+		float4 cur_color = finalpass_SceneTexture.Load(int3(pixel_point, 0));
+		
+		const float cos_phi = cos(aniso_data.z);
+		const float sin_phi = sin(aniso_data.z);
+		const float2x2 R = float2x2(cos_phi, -sin_phi, sin_phi, cos_phi);
+
+		// 異方性によるサンプル距離の最大・最小をクランプ.
+		const float scale_a = k_kernel_radius * clamp((k_aniso_param + aniso_data.w) / k_aniso_param, 0.1, 2.0);
+		const float scale_b = k_kernel_radius * clamp(k_aniso_param / (k_aniso_param + aniso_data.w), 0.1, 2.0);
+		const float2x2 S = float2x2(1.0/scale_a, 0.0, 0.0, 1.0/scale_b);
+
+		// 異方性方向キャンセルと異方性スケールキャンセルの行列.
+		float2x2 SR = mul(S, R);
+
+		const int sample_radius_x = k_kernel_radius;
+		const int sample_radius_y = k_kernel_radius;
+		
+		const float zeta = 2.0 / k_kernel_radius;
+		const float gamma = 3.0 * PI / (2.0 * k_aniso_kuwahara_section_count);
+		const float eta = (zeta + cos(gamma)) / (sin(gamma)*sin(gamma));
+		
+		float4 m[k_aniso_kuwahara_section_count];
+		float3 s[k_aniso_kuwahara_section_count];
+		for (int k = 0; k < k_aniso_kuwahara_section_count; ++k) {
+			m[k] = 0.0;
+			s[k] = 0.0;
+		}
+		for(int j = -sample_radius_y; j <= sample_radius_y; ++j)
+		{
+			for(int i = -sample_radius_x; i <= sample_radius_x; ++i)
+			{
+				const int2 sample_offset = int2(i, j);
+				const float2 normalize_sample_offset = mul(SR, float2(sample_offset));
+				
+				float3 sample_color = finalpass_SceneTexture.Load(int3(pixel_point + sample_offset, 0)).xyz;
+
+				// https://github.com/GarrettGunnell/Post-Processing/blob/main/Assets/Kuwahara%20Filter/AnisotropicKuwahara.shader
+				float2 v = normalize_sample_offset;
+			
+				float sum = 0;
+	            float w[k_aniso_kuwahara_section_count];
+	            float z, vxx, vyy;
+	            
+	            /* Calculate Polynomial Weights */
+	            vxx = zeta - eta * v.x * v.x;
+	            vyy = zeta - eta * v.y * v.y;
+	            z = max(0, v.y + vxx); 
+	            w[0] = z * z;
+	            sum += w[0];
+	            z = max(0, -v.x + vyy); 
+	            w[2] = z * z;
+	            sum += w[2];
+	            z = max(0, -v.y + vxx); 
+	            w[4] = z * z;
+	            sum += w[4];
+	            z = max(0, v.x + vyy); 
+	            w[6] = z * z;
+	            sum += w[6];
+	            v = sqrt(2.0f) / 2.0f * float2(v.x - v.y, v.x + v.y);
+	            vxx = zeta - eta * v.x * v.x;
+	            vyy = zeta - eta * v.y * v.y;
+	            z = max(0, v.y + vxx); 
+	            w[1] = z * z;
+	            sum += w[1];
+	            z = max(0, -v.x + vyy); 
+	            w[3] = z * z;
+	            sum += w[3];
+	            z = max(0, -v.y + vxx); 
+	            w[5] = z * z;
+	            sum += w[5];
+	            z = max(0, v.x + vyy); 
+	            w[7] = z * z;
+	            sum += w[7];
+	            
+	            float g = (0.0 < sum)? exp(-3.125f * dot(v,v)) / sum : 0.0;
+	            for (int k = 0; k < k_aniso_kuwahara_section_count; ++k)
+	            {
+	                float wk = w[k] * g;
+	                m[k] += float4(sample_color * wk, wk);
+	                s[k] += sample_color * sample_color * wk;
+	            }
+			}
+		}
+		
+		const float k_hardness = finalpass_hardness;//256;
+		const float k_sharpness = finalpass_sharpness;//8.0;
+		
+		float4 output = (float4)0;
+		for (int k = 0; k < k_aniso_kuwahara_section_count; ++k)
+		{
+			const float weight_div = (0.0 < m[k].w)? 1.0/m[k].w : 0.0;
+			m[k].rgb *= weight_div;
+			s[k] = abs(s[k] * weight_div - m[k].rgb * m[k].rgb);
+
+			float sigma2 = s[k].r + s[k].g + s[k].b;
+			float w = 1.0f / (1.0f + pow( k_hardness * 1000.0 * sigma2, k_sharpness));
+
+			output += float4(m[k].rgb * w, w);
+		}
+		output.xyz = (0.0 < output.w)? output.xyz/output.w : cur_color.xyz;
+		
+		finalpass_OutputTexture[DTid.xy] = float4(output.xyz, 0);
+	}
+

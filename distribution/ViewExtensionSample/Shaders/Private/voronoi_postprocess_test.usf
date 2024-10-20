@@ -1,0 +1,165 @@
+// voronoi_postprocess_test.usf
+
+#include "/Engine/Private/Common.ush"
+
+float SampleRandom(float2 st) {
+	return frac(sin(dot(st.xy,
+						 float2(12.9898,78.233)))*43758.5453123);
+}
+float2 SampleRandomFloat2Float2(float2 st) {
+	const float r0 = frac(sin(dot(st.xy, float2(12.9898,78.233)))*43758.5453123);
+	const float r1 = frac(sin(dot(st.xy, float2(120.9898,7.233)))*43758.5453123);
+	return float2(r0, r1);
+}
+
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Voronoi用にエッジ部と一定密度でのCell画像生成する.
+// Edge Detection and Output Voronoi Seed.
+	Texture2D pass1_SceneDepthTexture;
+	uint2 pass1_SourceDimensions;
+	SamplerState pass1_SourceSampler;
+
+	// pos.x, pos.y, edge_mask
+	RWTexture2D<float3> pass1_OutputTexture;
+	uint2 pass1_OutputDimensions;
+
+	float pass1_DepthEdgeCoef;
+	uint  pass1_EnableTileCell;
+
+	[numthreads(THREADGROUPSIZE_X,THREADGROUPSIZE_Y,THREADGROUPSIZE_Z)]
+	void GenVoronoiEdgeCS(
+		uint3 Gid	: SV_GroupID,
+		uint3 DTid	: SV_DispatchThreadID,
+		uint3 GTid	: SV_GroupThreadID,
+		uint Gi		: SV_GroupIndex
+		)
+	{
+		// エッジにCellCenterを生成.
+		float device_depth = pass1_SceneDepthTexture.Load(int3(DTid.xy, 0)).x;
+		// View空間深度変換. ViewUniformBufferを要求する.
+		float view_depth = ConvertFromDeviceZ(device_depth);
+		float vd0 = ConvertFromDeviceZ(pass1_SceneDepthTexture.Load(int3(DTid.xy + int2(-1, -1), 0)).x);
+		float vd1 = ConvertFromDeviceZ(pass1_SceneDepthTexture.Load(int3(DTid.xy + int2(0, -1), 0)).x);
+		float vd2 = ConvertFromDeviceZ(pass1_SceneDepthTexture.Load(int3(DTid.xy + int2(1, -1), 0)).x);
+		float vd3 = ConvertFromDeviceZ(pass1_SceneDepthTexture.Load(int3(DTid.xy + int2(-1, 0), 0)).x);
+		float vd4 = ConvertFromDeviceZ(pass1_SceneDepthTexture.Load(int3(DTid.xy + int2(1, 0), 0)).x);
+		float vd5 = ConvertFromDeviceZ(pass1_SceneDepthTexture.Load(int3(DTid.xy + int2(-1, 1), 0)).x);
+		float vd6 = ConvertFromDeviceZ(pass1_SceneDepthTexture.Load(int3(DTid.xy + int2(0, 1), 0)).x);
+		float vd7 = ConvertFromDeviceZ(pass1_SceneDepthTexture.Load(int3(DTid.xy + int2(1, 1), 0)).x);
+
+		const float depth_raplacian_filter = (vd0+vd1+vd2+vd3+vd4+vd5+vd6+vd7) - (8*view_depth); 
+
+		const float depth_edge_sign = sign(depth_raplacian_filter);
+		const float depth_edge_value = step(pass1_DepthEdgeCoef * view_depth, abs(depth_raplacian_filter));
+		// 深度購買の上端(近景の外側)を採用している.
+		//const float depth_edge_mask = saturate(-depth_edge_sign * depth_edge_value);
+		// 内側.
+		const float depth_edge_mask = saturate(depth_edge_sign * depth_edge_value);
+	
+		// ほぼ等間隔にCellCenterを生成してみるテスト.
+		const int k_cell_size = 10;
+		const int2 tile_pos = DTid.xy / k_cell_size;
+
+		// CellCenter判定用位置 : タイル中心固定
+		//const int2 k_cell_center_pos = (tile_pos * k_cell_size + int(k_cell_size*0.5));
+		// CellCenter判定用位置 : タイル内ランダム位置.
+		//const float2 tile_rand = SampleRandomFloat2Float2(tile_pos);
+		const float2 tile_rand = SampleRandom(tile_pos);// 対角線方向のみのランダムオフセットになるが, 筆っぽい見た目としてはこちらのほうが好ましいかも.
+		const int2 k_cell_center_pos = (tile_pos * k_cell_size + ((k_cell_size - 1) * tile_rand));
+
+		float fixed_tile_seed = 0;
+		if(pass1_EnableTileCell)
+		{
+			if(all( DTid.xy == k_cell_center_pos ))
+			{
+				fixed_tile_seed = 1;
+			}
+		}
+		
+		// 固定生成 + デプスエッジ
+		pass1_OutputTexture[DTid.xy] = float3(0, 0, saturate(fixed_tile_seed + depth_edge_mask));
+
+	}
+
+
+// ---------------------------------------------------------------------------------------------------------------------
+// デバッグ描画用.
+	Texture2D pass0_SourceTexture;
+	Texture2D pass0_VoronoiWorkTexture;
+	uint2 pass0_SourceDimensions;
+	SamplerState pass0_SourceSampler;
+
+	RWTexture2D<float4> pass0_OutputTexture;
+	uint2 pass0_OutputDimensions;
+
+	uint pass0_VisualizeMode;
+
+	[numthreads(THREADGROUPSIZE_X,THREADGROUPSIZE_Y,THREADGROUPSIZE_Z)]
+	void VoronoiPostprocessCS(
+		uint3 Gid	: SV_GroupID,
+		uint3 DTid	: SV_DispatchThreadID,
+		uint3 GTid	: SV_GroupThreadID,
+		uint Gi		: SV_GroupIndex
+		)
+	{
+		const float2 pixel_pos = DTid.xy + float2(0.5, 0.5);
+		float3 voronoi_value = pass0_VoronoiWorkTexture.Load(int3(DTid.xy, 0)).xyz;
+		float4 source_color = pass0_SourceTexture.Load(int3(DTid.xy, 0));
+
+		const float2 vec_to_nearest_edge = voronoi_value.xy - pixel_pos;
+		const bool is_edge = all(1 > vec_to_nearest_edge.xy);
+		const float len_to_nearest_edge = length(vec_to_nearest_edge);
+		const float2 dir_to_nearest_edge = (is_edge)? float2(1,0) : normalize(vec_to_nearest_edge);
+
+		
+		// デバッグモード.　
+		if(1 == pass0_VisualizeMode)
+		{
+			// Workのzにはエッジマスクが格納されているためデバッグ表示.
+			pass0_OutputTexture[DTid.xy] = voronoi_value.z;
+			return;
+		}
+		if(2 == pass0_VisualizeMode)
+		{
+			// Distance表示.
+			pass0_OutputTexture[DTid.xy] = saturate(len_to_nearest_edge / 300.0);
+			return;
+		}
+		if(3 == pass0_VisualizeMode)
+		{
+			// シンプルにVoronoiCell地点をサンプリング.
+			float4 voronoi_source_color = pass0_SourceTexture.Load(int3(voronoi_value.xy, 0));
+			pass0_OutputTexture[DTid.xy] = voronoi_source_color;
+			return;
+		}
+		if(4 == pass0_VisualizeMode)
+		{
+			// シンプルにVoronoiCell地点をサンプリング, エッジに近い箇所は元の値を優先.
+			float4 voronoi_source_color = pass0_SourceTexture.Load(int3(voronoi_value.xy, 0));
+			voronoi_source_color = lerp(source_color, voronoi_source_color, saturate(len_to_nearest_edge / 5.0));
+			pass0_OutputTexture[DTid.xy] = voronoi_source_color;
+			return;
+		}
+		
+		// Voronoi Stroke Test.
+		const float k_stroke_max_length = 20;
+		const float k_stroke_min_length = 2;
+		const float distance_rate = saturate(len_to_nearest_edge / 10.0);
+		const float stroke_dir_rate = lerp(0, 1.0, distance_rate);
+		const float2 stroke_dir = normalize(lerp(float2(dir_to_nearest_edge.y, -dir_to_nearest_edge.x), dir_to_nearest_edge, stroke_dir_rate));
+		float4 edge_stroke_color = pass0_SourceTexture.Load(int3(pixel_pos + stroke_dir * clamp(len_to_nearest_edge, k_stroke_min_length, k_stroke_max_length), 0));
+		if(5 == pass0_VisualizeMode)
+		{
+			pass0_OutputTexture[DTid.xy] = float4(stroke_dir, 0, 0);
+			return;
+		}
+		
+		pass0_OutputTexture[DTid.xy] = edge_stroke_color;
+		
+	}
+
+
+
+
+

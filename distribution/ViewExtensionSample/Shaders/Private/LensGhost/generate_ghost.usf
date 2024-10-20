@@ -1,0 +1,77 @@
+/*
+	generate_ghost.usf
+
+https://www.froyok.fr/blog/2021-09-ue4-custom-lens-flare/
+https://john-chapman-graphics.blogspot.com/2013/02/pseudo-lens-flare.html
+
+*/
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+
+
+Texture2D SeedTexture;
+uint2 SeedDimensions;
+float2 SeedValidRectScale;
+SamplerState SeedSampler;
+
+RWTexture2D<float4> OutputTexture;
+uint2 OutputDimensions;
+
+int ghost_sample_count;
+float ghost_sample_step_scale;
+
+float halo_sample_length;
+
+[numthreads(THREADGROUPSIZE_X,THREADGROUPSIZE_Y,THREADGROUPSIZE_Z)]
+void MainCS(
+	uint3 Gid	: SV_GroupID,
+	uint3 DTid	: SV_DispatchThreadID,
+	uint3 GTid	: SV_GroupThreadID,
+	uint Gi		: SV_GroupIndex
+	)
+{
+	const float2 pixel_pos = DTid.xy + float2(0.5, 0.5);
+	const float2 uv = saturate(pixel_pos / float2(OutputDimensions));
+
+	const float2 mirrored_uv = -uv + float2(1,1);
+	const float2 ghost_sample_vec = (float2(0.5, 0.5) - mirrored_uv) * ghost_sample_step_scale;
+	
+	float4 ghost_color = (float4)0;
+	{
+		float4 accum_color = (float4)0;
+		float accum_w = 0.0;
+
+		for(int i = 0; i < ghost_sample_count; ++i)
+		{
+			const float2 sample_offset = ghost_sample_vec * (i);
+			const float2 sample_uv = frac(mirrored_uv + sample_offset);
+
+			const float4 sample_color = SeedTexture.SampleLevel(SeedSampler, sample_uv*SeedValidRectScale, 0);
+
+			const float w = pow(saturate(1.0 - (length(float2(0.5, 0.5) - sample_uv)/0.5)), 8.0);
+			accum_color += sample_color * w;
+			accum_w += w;
+		}
+		ghost_color = accum_color;
+	}
+	
+	float4 halo_color = (float4)0;
+	if(0.01 < halo_sample_length)
+	{
+		const float2 sample_vec = any(0.0!=ghost_sample_vec)? normalize(ghost_sample_vec) * halo_sample_length : float3(0,0,0);
+		const float2 sample_uv = frac(mirrored_uv + sample_vec);
+		const float4 sample_color = SeedTexture.SampleLevel(SeedSampler, sample_uv*SeedValidRectScale, 0);
+		
+		float w = length(float2(0.5, 0.5) - sample_uv) / length(float2(0.5, 0.5));
+		w = pow(1.0 - w, 5.0);
+		
+		halo_color = sample_color * w;
+	}
+
+	float4 out_color = (float4)0;;
+
+	out_color += ghost_color;
+	out_color += halo_color;
+	
+	OutputTexture[DTid.xy] = out_color;
+}

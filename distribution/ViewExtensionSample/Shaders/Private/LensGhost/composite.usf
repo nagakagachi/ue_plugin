@@ -1,0 +1,40 @@
+/*
+	composite.usf
+
+https://www.froyok.fr/blog/2021-09-ue4-custom-lens-flare/
+https://john-chapman-graphics.blogspot.com/2013/02/pseudo-lens-flare.html
+
+*/
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+
+
+Texture2D LensGhostTexture;
+uint2 LensGhostDimensions;
+SamplerState LensGhostSampler;
+
+Texture2D SceneTexture;
+
+RWTexture2D<float4> OutputTexture;
+uint2 OutputDimensions;	
+
+[numthreads(THREADGROUPSIZE_X,THREADGROUPSIZE_Y,THREADGROUPSIZE_Z)]
+void MainCS(
+	uint3 Gid	: SV_GroupID,
+	uint3 DTid	: SV_DispatchThreadID,
+	uint3 GTid	: SV_GroupThreadID,
+	uint Gi		: SV_GroupIndex
+	)
+{
+	const float2 pixel_pos = DTid.xy + float2(0.5, 0.5);
+
+#if 1
+	// read write.
+	const float4 src_value = LensGhostTexture.Load(int3(DTid.xy, 0));
+	const float4 dst_prev_value = SceneTexture.Load(int3(DTid.xy, 0));
+	OutputTexture[DTid.xy] = float4(dst_prev_value.xyz + src_value.xyz, dst_prev_value.w);
+#else
+	const float4 src_value = LensGhostTexture.Load(int3(DTid.xy, 0));
+	OutputTexture[DTid.xy] = src_value;
+#endif
+}

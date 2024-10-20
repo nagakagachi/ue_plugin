@@ -1,0 +1,47 @@
+/*
+	extract_bright.usf
+
+https://www.froyok.fr/blog/2021-09-ue4-custom-lens-flare/
+https://john-chapman-graphics.blogspot.com/2013/02/pseudo-lens-flare.html
+
+*/
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+
+
+Texture2D SourceTexture;
+uint2 SourceDimensions;
+float2 SourceValidRectScale;
+SamplerState SourceSampler;
+
+RWTexture2D<float4> OutputTexture;
+uint2 OutputDimensions;
+
+float extract_threshold;
+
+float chroma_shift;
+
+[numthreads(THREADGROUPSIZE_X,THREADGROUPSIZE_Y,THREADGROUPSIZE_Z)]
+void MainCS(
+	uint3 Gid	: SV_GroupID,
+	uint3 DTid	: SV_DispatchThreadID,
+	uint3 GTid	: SV_GroupThreadID,
+	uint Gi		: SV_GroupIndex
+	)
+{
+	const float2 pixel_pos = (DTid.xy + float2(0.5, 0.5));
+
+	const float2 uv = saturate(pixel_pos / float2(OutputDimensions));
+	const float2 uvr = saturate(float2(0.5, 0.5) + (uv - float2(0.5, 0.5))*(1.0 + chroma_shift));
+	const float2 uvb = saturate(float2(0.5, 0.5) + (uv - float2(0.5, 0.5))*(1.0 - chroma_shift));
+
+	//const float4 src_value = SourceTexture.Load(int3(DTid.xy, 0));
+	const float chroma_shifted_r = SourceTexture.SampleLevel(SourceSampler, uvr*SourceValidRectScale, 0).r;
+	const float chroma_shifted_g = SourceTexture.SampleLevel(SourceSampler, uv*SourceValidRectScale, 0).g;
+	const float chroma_shifted_b = SourceTexture.SampleLevel(SourceSampler, uvb*SourceValidRectScale, 0).b;
+	const float4 src_value = float4(chroma_shifted_r, chroma_shifted_g, chroma_shifted_b, 0.0);
+
+	float4 extract_color = max(0, src_value - extract_threshold);
+	
+	OutputTexture[DTid.xy] = extract_color;
+}
