@@ -4,6 +4,7 @@ SceneViewExtension + RDG Sample Plugin
 
 - Setup
   - copy "ViewExtensionSample" directory to "Plugins" directory
+  - Enable "ViewExtensionSample" in PluginWindow
   - drag&drop ViewExtensionSampleControlActor to Level
   - change parameters
 
